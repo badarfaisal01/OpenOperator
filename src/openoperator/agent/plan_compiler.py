@@ -1,101 +1,53 @@
 """
-Vision Plan Compiler for OpenOperator.
-
-Validates and compiles VisionTaskPlan objects into executable plans.
+Plan Compiler module for OpenOperator.
 """
 
 import logging
+from typing import List
 
-from openoperator.agent.vision_models import (
-    VisionActionType,
-    VisionTaskPlan,
-)
+from openoperator.agent.vision_models import VisionActionType, VisionStep, VisionTaskPlan
 
 logger = logging.getLogger(__name__)
 
 
 class VisionPlanCompiler:
-    """
-    Validates and compiles parsed VisionTaskPlans.
-    """
-
-    def compile(
-        self,
-        plan: VisionTaskPlan,
-    ) -> VisionTaskPlan:
-
-        if not plan.steps:
-            plan.is_executable = False
-
-            if (
-                "No valid action keywords found in the prompt."
-                not in plan.missing_context
-            ):
-                plan.missing_context.append(
-                    "No executable steps available."
-                )
-
+    def compile(self, plan: VisionTaskPlan) -> VisionTaskPlan:
+        if not plan.is_executable or not plan.steps:
+            if not plan.steps:
+                plan.is_executable = False
+                plan.missing_context.append("Plan contains no executable steps.")
             return plan
 
-        seen_focus = False
-        seen_click = False
+        optimized_steps: List[VisionStep] = []
+        has_context_established = False
 
         for step in plan.steps:
+            if step.action_type == VisionActionType.CLICK_TEXT and not step.target_element:
+                plan.is_executable = False
+                return plan
+            if step.action_type in (VisionActionType.VERIFY_STATE, VisionActionType.TYPE_TEXT, VisionActionType.RUN_COMMAND) and not step.input_data:
+                plan.is_executable = False
+                return plan
+            if step.action_type in (VisionActionType.LAUNCH_APP, VisionActionType.OPEN_URL) and not step.target_element:
+                plan.is_executable = False
+                return plan
 
-            if step.action_type == VisionActionType.FOCUS_WINDOW:
+            if step.action_type in (VisionActionType.FOCUS_WINDOW, VisionActionType.CLICK_TEXT, VisionActionType.LAUNCH_APP, VisionActionType.OPEN_URL, VisionActionType.RUN_COMMAND):
+                has_context_established = True
+                
+            if step.action_type == VisionActionType.TYPE_TEXT and not has_context_established:
+                plan.is_executable = False
+                return plan
 
-                seen_focus = True
+            if optimized_steps:
+                last_step = optimized_steps[-1]
+                if (step.action_type == VisionActionType.FOCUS_WINDOW and 
+                    last_step.action_type == VisionActionType.FOCUS_WINDOW and 
+                    step.target_element == last_step.target_element):
+                    continue
 
-                if not step.target_element:
-                    plan.is_executable = False
+            step.step_id = len(optimized_steps) + 1
+            optimized_steps.append(step)
 
-                    plan.missing_context.append(
-                        "FOCUS_WINDOW requires target_element."
-                    )
-
-            elif step.action_type == VisionActionType.CLICK_TEXT:
-
-                seen_click = True
-
-                if not step.target_element:
-                    plan.is_executable = False
-
-                    plan.missing_context.append(
-                        "CLICK_TEXT requires target_element."
-                    )
-
-            elif step.action_type == VisionActionType.TYPE_TEXT:
-
-                if not step.input_data:
-                    plan.is_executable = False
-
-                    plan.missing_context.append(
-                        "TYPE_TEXT requires input_data."
-                    )
-
-                if not seen_focus and not seen_click:
-                    plan.is_executable = False
-
-                    plan.missing_context.append(
-                        "TYPE_TEXT requires a prior FOCUS_WINDOW or CLICK_TEXT."
-                    )
-
-            elif step.action_type == VisionActionType.VERIFY_STATE:
-
-                if not step.input_data:
-                    plan.is_executable = False
-
-                    plan.missing_context.append(
-                        "VERIFY_STATE requires input_data."
-                    )
-
-        if plan.is_executable:
-            logger.info(
-                "VisionTaskPlan compiled successfully."
-            )
-        else:
-            logger.warning(
-                "VisionTaskPlan compilation failed."
-            )
-
+        plan.steps = optimized_steps
         return plan
