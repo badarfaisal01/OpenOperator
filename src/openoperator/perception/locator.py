@@ -16,9 +16,11 @@ from typing import Any, Callable, Dict, List, Tuple
 
 import pytesseract
 from PIL import Image, UnidentifiedImageError
+from PIL import ImageOps
 from pydantic import BaseModel
 
 from openoperator.core.models import BoundingBox, UITarget
+from openoperator.perception import fuzzy
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +73,12 @@ class TextLocatorEngine:
             current_image_bytes = image_provider()
             
             targets = self.find_text_targets(
-                image_bytes=current_image_bytes, 
+                image_bytes=current_image_bytes,
                 search_text=search_text,
                 exact_match=exact_match,
-                fuzzy_threshold=fuzzy_threshold
+                fuzzy_threshold=fuzzy_threshold,
+                dark_mode=dark_mode,
+                crop_box=crop_box,
             )
             
             if targets:
@@ -93,7 +97,9 @@ class TextLocatorEngine:
         image_bytes: bytes, 
         search_text: str, 
         exact_match: bool = False,
-        fuzzy_threshold: float = 0.85
+        fuzzy_threshold: float = 0.85,
+        dark_mode: bool = False,
+        crop_box: Tuple[int, int, int, int] | None = None,
     ) -> List[UITarget]:
         """
         Locates multi-word text targets on the screen.
@@ -115,6 +121,22 @@ class TextLocatorEngine:
             image = Image.open(io.BytesIO(image_bytes))
             if image.mode not in ("RGB", "L", "RGBA"):
                 image = image.convert("RGB")
+
+            # Optional cropping to limit OCR region and improve speed/accuracy.
+            # crop_box must be (left, top, width, height)
+            if crop_box:
+                left, top, width, height = crop_box
+                right = left + width
+                bottom = top + height
+                image = image.crop((left, top, right, bottom))
+
+            # Dark mode preprocessing: invert image to improve OCR on inverted UIs
+            if dark_mode:
+                try:
+                    image = ImageOps.invert(image.convert("RGB"))
+                except Exception:
+                    # If invert fails, continue with original image
+                    logger.warning("Dark mode image preprocessing failed; proceeding without inversion.")
         except UnidentifiedImageError:
             logger.error("Failed to parse image bytes.")
             return []
@@ -166,7 +188,13 @@ class TextLocatorEngine:
                             match_score = 0.95
                         # 3. Fallback to difflib for actual OCR misreadings (e.g., "New cnat")
                         else:
-                            ratio = difflib.SequenceMatcher(None, norm_search, norm_phrase).ratio()
+                            # Use the more robust fuzzy matching utilities when available
+                            try:
+                                ratio = fuzzy.fuzzy_match_score(norm_search, norm_phrase)
+                            except Exception:
+                                # Fallback to difflib if fuzzy utilities fail
+                                ratio = difflib.SequenceMatcher(None, norm_search, norm_phrase).ratio()
+
                             if ratio >= fuzzy_threshold:
                                 is_match = True
                                 match_score = ratio
